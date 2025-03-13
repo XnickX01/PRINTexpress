@@ -23,7 +23,7 @@ const mysql = require('mysql2');
 const { Client } = require('ssh2');
 require('dotenv').config();
 
-
+const sshClient = new Client();
 const dbServer = {
     host: process.env.DB_HOST,
     port: parseInt(process.env.DB_PORT, 10),
@@ -32,120 +32,71 @@ const dbServer = {
     database: process.env.DB_NAME
 };
 
-const useSSH = process.env.DB_SSH === 'true';
-if(useSSH)
-{
-	const sshClient = new Client();
-	const tunnelConfig = {
-		host: process.env.DB_SSH_HOST,
-		port: 22,
-		username: process.env.DB_SSH_USER,
-		password: process.env.DB_SSH_PASSWORD
-	};
+const tunnelConfig = {
+    host: process.env.DB_SSH_HOST,
+    port: 22,
+    username: process.env.DB_SSH_USER,
+    password: process.env.DB_SSH_PASSWORD
+};
 
-	const forwardConfig = {
-		srcHost: '127.0.0.1', // Localhost for the SSH tunnel
-		srcPort: 3306, // Local port (can be any free port)
-		dstHost: dbServer.host, // Destination host (database host, as seen from the SSH server)
-		dstPort: dbServer.port // Destination port
-	};
+const forwardConfig = {
+    srcHost: '127.0.0.1', // Localhost for the SSH tunnel
+    srcPort: 3306, // Local port (can be any free port)
+    dstHost: dbServer.host, // Destination host (database host, as seen from the SSH server)
+    dstPort: dbServer.port // Destination port
+};
 
+function createConnection(config) {
+    return new Promise((resolve, reject) => {
+        sshClient.on('ready', () => {
+            sshClient.forwardOut(
+                forwardConfig.srcHost,
+                forwardConfig.srcPort,
+                forwardConfig.dstHost,
+                forwardConfig.dstPort,
+                (err, stream) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+                    // Create a MySQL connection over the SSH tunnel
+                    const updatedDbServer = {
+                        ...config,
+                        stream,
+                        multipleStatements: true // Enable executing multiple statements (if needed)
+                    };
+                    const connection = mysql.createConnection(updatedDbServer);
+                    connection.connect(error => {
+                        if (error) {
+                            reject(error);
+                            return;
+                        }
+                        console.log('Connected to the database via SSH tunnel');
+                        resolve(connection);
+                    });
 
-
-
-
-
-	function createConnection(config) {
-		return new Promise((resolve, reject) => {
-			sshClient.on('ready', () => {
-				sshClient.forwardOut(
-					forwardConfig.srcHost,
-					forwardConfig.srcPort,
-					forwardConfig.dstHost,
-					forwardConfig.dstPort,
-					(err, stream) => {
-						if (err) {
-							reject(err);
-							return;
-						}
-						// Create a MySQL connection over the SSH tunnel
-						const updatedDbServer = {
-							...config,
-							stream,
-							multipleStatements: true // Enable executing multiple statements (if needed)
-						};
-						const connection = mysql.createConnection(updatedDbServer);
-						connection.connect(error => {
-							if (error) {
-								reject(error);
-								return;
-							}
-							console.log('Connected to the database via SSH tunnel');
-							resolve(connection);
-						});
-
-						connection.on('error', error => {
-							if (error.code === 'PROTOCOL_CONNECTION_LOST') {
-								console.error('Database connection was closed. Reconnecting...');
-								createConnection(config).then(resolve).catch(reject); // Recreate the connection
-							} else {
-								reject(error);
-							}
-						});
-					}
-				);
-			}).connect(tunnelConfig);
-		});
-	}
-	const SSHConnection = createConnection(dbServer);
-
-	SSHConnection.then(db => {
-		// Use the db connection here
-		module.exports = db;
-	}).catch(err => {
-		console.error('Failed to connect to the database via SSH tunnel:', err);
-		process.exit(1);
-	});
-
-	module.exports = SSHConnection; // SSHConnection is the promise that resolves to the db connection
-}
-else
-{
-	function createDirectConnection(config) {
-        return new Promise((resolve, reject) => {
-            const connection = mysql.createConnection({
-                ...config,
-                multipleStatements: true // Enable executing multiple statements (if needed)
-            });
-            connection.connect(error => {
-                if (error) {
-                    reject(error);
-                    return;
+                    connection.on('error', error => {
+                        if (error.code === 'PROTOCOL_CONNECTION_LOST') {
+                            console.error('Database connection was closed. Reconnecting...');
+                            createConnection(config).then(resolve).catch(reject); // Recreate the connection
+                        } else {
+                            reject(error);
+                        }
+                    });
                 }
-                console.log('Connected to the database directly');
-                resolve(connection);
-            });
-
-            connection.on('error', error => {
-                if (error.code === 'PROTOCOL_CONNECTION_LOST') {
-                    console.error('Database connection was lost. Reconnecting...');
-                    createDirectConnection(config).then(resolve).catch(reject);
-                } else {
-                    reject(error);
-                }
-            });
-        });
-    }
-
-    const directConnection = createDirectConnection(dbServer);
-
-    directConnection.then(db => {
-        // Use the db connection here
-        module.exports = db;
-    }).catch(err => {
-        console.error('Failed to connect to the database directly:', err);
-        process.exit(1);
+            );
+        }).connect(tunnelConfig);
     });
-
-    module.exports = directConnection;
 }
+
+const SSHConnection = createConnection(dbServer);
+
+SSHConnection.then(db => {
+    // Use the db connection here
+    module.exports = db;
+}).catch(err => {
+    console.error('Failed to connect to the database via SSH tunnel:', err);
+    process.exit(1);
+});
+
+module.exports = SSHConnection; // SSHConnection is the promise that resolves to the db connection
